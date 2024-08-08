@@ -43,6 +43,17 @@ PROPERTY_PROXY_URL = "proxy_url"  # Optional
 PROPERTY_MAX_MEMORY_LENGTH = "max_memory_length"  # Optional
 
 
+BASE_STAGE_PROMPTS = """
+                    ## 需求
+                    请基于潜在客户同保险销售代理人的历史对话进行客观评估，判断其是否满足：
+                    - {conditions}
+                    
+                    评分范围为0-100分，若满足条件，请给出至少70以上的得分；
+                    仅返回整数形式分数值，不带标点或字符串，如75
+                    """
+STAGE_PROMPTS = ["", "", ]
+
+
 def get_current_time():
     # Get the current time
     start_time = datetime.now()
@@ -75,9 +86,11 @@ def parse_sentence(sentence, content):
 
 class OpenAIChatGPTExtension(Extension):
     memory = []
+    chat_count = 0
     max_memory_length = 10
     outdate_ts = 0
     openai_chatgpt = None
+    openai_chatgpt_eval = None
 
     def on_start(self, rte: RteEnv) -> None:
         logger.info("OpenAIChatGPTExtension on_start")
@@ -171,6 +184,7 @@ class OpenAIChatGPTExtension(Extension):
                 f"GetProperty optional {PROPERTY_MAX_MEMORY_LENGTH} failed, err: {err}"
             )
 
+
         # Create openaiChatGPT instance
         try:
             self.openai_chatgpt = OpenAIChatGPT(openai_chatgpt_config)
@@ -179,6 +193,15 @@ class OpenAIChatGPTExtension(Extension):
             )
         except Exception as err:
             logger.info(f"newOpenaiChatGPT failed, err: {err}")
+
+        # Create GPT instance for evaluation
+        try:
+            self.openai_chatgpt_eval = OpenAIChatGPT(openai_chatgpt_config)
+            logger.info(
+                f"newOpenaiChatGPT for eval succeed with max_tokens: {openai_chatgpt_eval_config.max_tokens}, model: {openai_chatgpt_eval_config.model}"
+            )
+        except Exception as err:
+            logger.info(f"newOpenaiChatGPT for eval failed, err: {err}")
 
         # Send greeting if available
         if greeting:
@@ -233,6 +256,25 @@ class OpenAIChatGPTExtension(Extension):
         """
         logger.info(f"OpenAIChatGPTExtension on_data")
 
+        def chat_quality_evaluation(memory, chat_count):
+            if chat_count % 5 == 0 and chat_count != 0:
+            node = chat_count / 5
+            self.openai_chatgpt_eval.config.prompt = BASE_STAGE_PROMPTS.format(conditions=STAGE_PROMPTS[node])
+            try: 
+                logger.info(
+                f"GetEval for node: [{node}] memory: {memory}"
+            )
+                resp = self.openai_chatgpt_eval.get_chat_completion(memory) 
+                return resp
+            except Exception as err:
+                logger.info(
+                f"GetEval for node: [{node}] failed, err: {err}"
+            )
+                return 
+        result = chat_quality_evaluation(self.memory, self.chat_count)
+        score = 
+
+
         # Assume 'data' is an object from which we can get properties
         try:
             is_final = data.get_property_bool(DATA_IN_TEXT_DATA_PROPERTY_IS_FINAL)
@@ -263,7 +305,8 @@ class OpenAIChatGPTExtension(Extension):
             self.memory.pop(0)
         self.memory.append({"role": "user", "content": input_text})
 
-        def chat_completions_stream_worker(start_time, input_text, memory):
+
+        def chat_completions_stream_worker(start_time, input_text, memory, chat_count):
             try:
                 logger.info(
                     f"GetChatCompletionsStream for input text: [{input_text}] memory: {memory}"
@@ -337,6 +380,7 @@ class OpenAIChatGPTExtension(Extension):
 
                 # remember response as assistant content in memory
                 memory.append({"role": "assistant", "content": full_content})
+                chat_count += 1
 
                 # send end of segment
                 try:
@@ -355,6 +399,7 @@ class OpenAIChatGPTExtension(Extension):
                     logger.info(
                         f"GetChatCompletionsStream for input text: [{input_text}] end of segment with sentence [{sentence}] send failed, err: {err}"
                     )
+                    
 
             except Exception as e:
                 logger.info(
@@ -365,7 +410,7 @@ class OpenAIChatGPTExtension(Extension):
         start_time = get_current_time()
         thread = Thread(
             target=chat_completions_stream_worker,
-            args=(start_time, input_text, self.memory),
+            args=(start_time, input_text, self.memory, self.chat_count),
         )
         thread.start()
         logger.info(f"OpenAIChatGPTExtension on_data end")
