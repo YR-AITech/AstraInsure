@@ -42,16 +42,81 @@ PROPERTY_GREETING = "greeting"  # Optional
 PROPERTY_PROXY_URL = "proxy_url"  # Optional
 PROPERTY_MAX_MEMORY_LENGTH = "max_memory_length"  # Optional
 
+MAX_NODE = 2
+BASE_PROMPTS_CHAT = """
+# 人物: 王女士
 
-BASE_STAGE_PROMPTS = """
+## 描述：
+
+### 基本信息：
+- 年龄：36
+- 性别：女
+- 职业：教师
+- 收入水平：中等
+- 居住地：上海
+
+### 家庭情况：
+- 婚姻状态：已婚
+- 配偶年龄：36
+- 子女信息：两个孩子，一个10岁，一个6岁
+- 家庭成员健康状况：均健康
+
+### 健康状况：
+- 当前健康状况：良好
+- 医疗历史：无重大疾病史
+
+### 经济状况：
+- 经济状况：中等
+- 支出优先级：优先孩子
+
+### 保险意识：
+- 保险意识：较好
+- 保险经历：购买过保险产品
+- 保险认知：略微了解保险流程
+
+### 性格：
+- 性格类型：平和
+
+### 生活方式：
+- 生活习惯：
+- 兴趣爱好：
+
+### 情绪和社交：
+- 当前情绪：因为最近事务多比较心烦；邻居的孩子生病花费了很多钱，担心自己孩子和丈夫未来生病的情况。
+- 未来期望：重视孩子的健康和教育，重视家庭成员的健康。
+- 家庭关系：孩子课业有困难，最近经常辅导；丈夫因为工作忙，经常不回家。
+- 社会关系：和邻居闹了矛盾
+
+## 任务
+作为购买保险的潜在客户王女士，和保险公司销售代理人进行对话，基于人物描述和从销售取得的信息进行交流，目前的对话主要围绕：
+- {conditions}
+
+## 规则：
+- 作为王女士，必须以符合人物描述中的信息内容进行交流；
+- 必须使用中文，说话方式口语化、生活化，语气符合人物描述；
+"""
+NODE_PROMPTS_CHAT = ["和对方初次接触和了解", "和对方初步交流近期的状况，适当流露相应的情感和信息"]
+
+
+BASE_PROMPTS_EVAL = """
                     ## 需求
                     请基于潜在客户同保险销售代理人的历史对话进行客观评估，判断其是否满足：
                     - {conditions}
                     
-                    评分范围为0-100分，若满足条件，请给出至少70以上的得分；
-                    仅返回整数形式分数值，不带标点或字符串，如75
+                    评分范围为0-100分，若满足要求，请给出至少70以上的得分；
+                    仅返回整数形式得分，不带标点或字符串，如75
                     """
-STAGE_PROMPTS = ["", "", ]
+BASE_PROMPTS_FAIL_EVAL = """
+                    ## 需求
+                    请基于潜在客户同保险销售代理人的历史对话进行客观评估，给出其不满足下述需求的简短理由：
+                    - {conditions}
+
+                    不超过100字。
+                    """
+
+NODE_PROMPTS_EVAL = ["保险销售代理人需要完成同顾客的初次接触和关系建立", 
+                "保险销售代理需要和顾客进行情感上的交流并引导产生情感共鸣"
+                    ]
 
 
 def get_current_time():
@@ -256,10 +321,8 @@ class OpenAIChatGPTExtension(Extension):
         """
         logger.info(f"OpenAIChatGPTExtension on_data")
 
-        def chat_quality_evaluation(memory, chat_count):
-            if chat_count % 5 == 0 and chat_count != 0:
-            node = chat_count / 5
-            self.openai_chatgpt_eval.config.prompt = BASE_STAGE_PROMPTS.format(conditions=STAGE_PROMPTS[node])
+        def chat_quality_evaluation(memory, node):
+            self.openai_chatgpt_eval.config.prompt = BASE_PROMPTS_EVAL.format(conditions=NODE_PROMPTS_EVAL[node-1])
             try: 
                 logger.info(
                 f"GetEval for node: [{node}] memory: {memory}"
@@ -271,8 +334,6 @@ class OpenAIChatGPTExtension(Extension):
                 f"GetEval for node: [{node}] failed, err: {err}"
             )
                 return 
-        result = chat_quality_evaluation(self.memory, self.chat_count)
-        score = 
 
 
         # Assume 'data' is an object from which we can get properties
@@ -300,20 +361,21 @@ class OpenAIChatGPTExtension(Extension):
             )
             return
 
+
         # Prepare memory
         if len(self.memory) > self.max_memory_length:
             self.memory.pop(0)
         self.memory.append({"role": "user", "content": input_text})
 
 
-        def chat_completions_stream_worker(start_time, input_text, memory, chat_count):
+        def chat_completions_stream_worker(chatgpt, start_time, input_text, memory, chat_count):
             try:
                 logger.info(
                     f"GetChatCompletionsStream for input text: [{input_text}] memory: {memory}"
                 )
 
                 # Get result from AI
-                resp = self.openai_chatgpt.get_chat_completions_stream(memory)
+                resp = chatgpt.get_chat_completions_stream(memory)
                 if resp is None:
                     logger.info(
                         f"GetChatCompletionsStream for input text: [{input_text}] failed"
@@ -406,10 +468,56 @@ class OpenAIChatGPTExtension(Extension):
                     f"GetChatCompletionsStream for input text: [{input_text}] failed, err: {e}"
                 )
 
+        def chat(start_time, input_text, memory, chat_count):
+            if chat_count == 0:
+                self.openai_chatgpt.config.prompt = BASE_PROMPTS_CHAT.format(conditions=NODE_PROMPTS_CHAT[0])
+            if chat_count == 0 or chat_count % 5 != 0:
+                chat_completions_stream_worker(self.openai_chatgpt, start_time, input_text, memory, chat_count)
+
+            else:
+                node = chat_count / 5
+                node_prompt_eval = BASE_PROMPTS_EVAL.format(conditions=NODE_PROMPTS_EVAL[node-1])
+                self.openai_chatgpt_eval.config.prompt = node_prompt_eval
+                resp = chat_quality_evaluation(memory, node)
+                score = resp.["choices"][0]["message"]["content"]
+
+                try:
+                    score = int(score)
+                    logger.info(
+                        f"GetEvalScore : {score} of node {node}"
+                    )
+
+                except Exception as err:
+                    logger.info(
+                        f"GetEvalScore : {score} of node {node} failed, err: {err}"
+                    )
+                    score = 70
+
+            if score >= 70:
+
+                if node == MAX_NODE:
+                    ############TODO: 弹窗提示交易成功
+                    chat_count = 0
+                    memory = []
+                    #self.openai_chatgpt.config.prompt = BASE_PROMPTS_CHAT.format(conditions=NODE_PROMPTS_CHAT[0])
+                    #self.openai_chatgpt_eval.config.prompt = BASE_PROMPTS_EVAL.format(conditions=NODE_PROMPTS_EVAL[0])
+
+
+                else:
+                    self.openai_chatgpt.config.prompt = BASE_PROMPTS_CHAT.format(conditions=NODE_PROMPTS_CHAT[node])
+                    chat_completions_stream_worker(start_time, input_text, memory, chat_count)
+
+            else:
+                self.openai_chatgpt_eval.config.prompt = BASE_PROMPTS_FAIL_EVAL.format(conditions=NODE_PROMPTS_EVAL[node-1])
+                chat_completions_stream_worker(self.openai_chatgpt_eval, start_time, input_text, memory, chat_count)
+                #############TODO: 弹窗提示交易失败
+                chat_count = 0
+                memory = []
+
         # Start thread to request and read responses from OpenAI
         start_time = get_current_time()
         thread = Thread(
-            target=chat_completions_stream_worker,
+            target=chat,
             args=(start_time, input_text, self.memory, self.chat_count),
         )
         thread.start()
